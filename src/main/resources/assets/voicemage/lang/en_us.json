@@ -1,0 +1,8 @@
+{
+  "voicemage.mana": "Mana",
+  "voicemage.mic.listening": "Voice: listening",
+  "voicemage.mic.loading": "Voice: loading",
+  "voicemage.mic.off": "Voice: unavailable",
+  "key.voicemage.toggle_voice": "Toggle Voice Recognition",
+  "key.category.voicemage.controls": "voicemage"
+}

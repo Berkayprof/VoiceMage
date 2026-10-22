@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "voicemage",
+  "version": "${version}",
+  "name": "voicemage",
+  "description": "Cast powerful, server-authoritative spells by speaking their names.",
+  "authors": ["Caden"],
+  "license": "MIT",
+  "environment": "*",
+  "mixins": ["voicemage.mixins.json"],
+  "entrypoints": {
+    "main": ["com.voicemage.Voicemage"],
+    "client": ["com.voicemage.VoicemageClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "required": true,
+  "package": "com.voicemage.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": ["MannequinAccessor"],
+  "injectors": { "defaultRequire": 1 }
+}
