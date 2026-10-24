@@ -1,15 +1,14 @@
 package com.voicemage.client;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.voicemage.Voicemage;
 import com.voicemage.spell.Spell;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.BiConsumer;
-import javax.sound.sampled.AudioFormat;
-import javax.sound.sampled.AudioSystem;
-import javax.sound.sampled.TargetDataLine;
-import javax.sound.sampled.DataLine.Info;
 import org.vosk.LibVosk;
 import org.vosk.LogLevel;
 import org.vosk.Model;
@@ -17,15 +16,39 @@ import org.vosk.Recognizer;
 
 public final class VoiceRecognitionService {
    private static final float SAMPLE_RATE = 16000.0F;
-   private static final String GRAMMAR = "[\"fireball\",\"fire ball\",\"pitfall\",\"pit fall\",\"heal\",\"lightning\",\"lightening\",\"earth wall\",\"earthwall\",\"blink\",\"magic missile\",\"magic missle\",\"meteor\",\"wind blast\",\"windblast\",\"freeze\",\"clone\",\"polymorph\",\"poly morph\",\"shrink\",\"o ancient flame awaken from your endless slumber let the skys burn and turn my enemies to ash leaving nothing behind explosion\",\"o ancient flame awaken from your endless slumber let the skies burn and turn my enemies to ash leaving nothing behind explosion\",\"darkness blacker than black and darker than dark i beseech thee combine with my deep crimson return all creation to cinders and come from the abyss explosion\",\"[unk]\"]";
+   /** Words must exist in the speech model's vocabulary, otherwise Vosk ignores them (so no "earthwall"/"windblast"). */
+   private static final List<String> COMMAND_PHRASES = List.of(
+      "fireball", "fire ball", "pitfall", "pit fall", "heal", "lightning", "lightening", "earth wall", "blink", "magic missile",
+      "magic missle", "meteor", "wind blast", "freeze", "clone", "polymorph", "poly morph", "shrink"
+   );
+   private static final String GRAMMAR_CHANT_REQUIRED = grammar(false);
+   private static final String GRAMMAR_EXPLOSION_ALONE = grammar(true);
    private final BiConsumer<Spell, String> onSpell;
    private volatile boolean running;
    private volatile boolean explosionChantRequired = true;
    private volatile String status = "Voice: starting...";
    private volatile String partialText = "";
-   private volatile TargetDataLine microphone;
+   private volatile MicrophoneCapture microphone;
    private volatile long generation;
    private Thread thread;
+
+   public VoiceRecognitionService(BiConsumer<Spell, String> onSpell) {
+      this.onSpell = onSpell;
+   }
+
+   private static String grammar(boolean explosionAloneAllowed) {
+      List<String> phrases = new ArrayList<>(COMMAND_PHRASES);
+      phrases.add(Spell.EXPLOSION.phrase());
+      phrases.add(Spell.ALTERNATIVE_CHANT);
+      if (explosionAloneAllowed) {
+         phrases.add("explosion");
+      }
+
+      phrases.add("[unk]");
+      JsonArray array = new JsonArray();
+      phrases.forEach(array::add);
+      return array.toString();
+   }
 
    public void setExplosionChantRequired(boolean required) {
       this.explosionChantRequired = required;
@@ -33,10 +56,6 @@ public final class VoiceRecognitionService {
 
    public boolean explosionChantRequired() {
       return this.explosionChantRequired;
-   }
-
-   public VoiceRecognitionService(BiConsumer<Spell, String> onSpell) {
-      this.onSpell = onSpell;
    }
 
    public String status() {
@@ -71,9 +90,8 @@ public final class VoiceRecognitionService {
    public synchronized void stop() {
       this.generation++;
       this.running = false;
-      TargetDataLine active = this.microphone;
+      MicrophoneCapture active = this.microphone;
       if (active != null) {
-         active.stop();
          active.close();
       }
 
@@ -87,82 +105,49 @@ public final class VoiceRecognitionService {
    }
 
    private void run(long runId) {
+      Model model = null;
+
       try {
          Path modelPath = SpeechModelInstaller.ensureInstalled(value -> this.setStatus(runId, value));
-         if (this.isCurrent(runId)) {
-            LibVosk.setLogLevel(LogLevel.WARNINGS);
-            AudioFormat format = new AudioFormat(16000.0F, 16, 1, true, false);
-            Info info = new Info(TargetDataLine.class, format);
-            if (!AudioSystem.isLineSupported(info)) {
-               throw new IllegalStateException("No microphone supports 16 kHz mono audio");
-            }
+         if (!this.isCurrent(runId)) {
+            return;
+         }
 
-            Model model = new Model(modelPath.toString());
+         this.setStatus(runId, "Voice: loading speech model...");
+         LibVosk.setLogLevel(LogLevel.WARNINGS);
+         model = SharedSpeechModel.acquire(modelPath);
+         if (!this.isCurrent(runId)) {
+            return;
+         }
 
-            label211: {
-               try {
-                  Recognizer recognizer = new Recognizer(
-                     model,
-                     16000.0F,
-                     "[\"fireball\",\"fire ball\",\"pitfall\",\"pit fall\",\"heal\",\"lightning\",\"lightening\",\"earth wall\",\"earthwall\",\"blink\",\"magic missile\",\"magic missle\",\"meteor\",\"wind blast\",\"windblast\",\"freeze\",\"clone\",\"polymorph\",\"poly morph\",\"shrink\",\"o ancient flame awaken from your endless slumber let the skys burn and turn my enemies to ash leaving nothing behind explosion\",\"o ancient flame awaken from your endless slumber let the skies burn and turn my enemies to ash leaving nothing behind explosion\",\"darkness blacker than black and darker than dark i beseech thee combine with my deep crimson return all creation to cinders and come from the abyss explosion\",\"[unk]\"]"
-                  );
+         boolean chantRequired = this.explosionChantRequired;
 
-                  label175: {
-                     try {
-                        TargetDataLine line = (TargetDataLine)AudioSystem.getLine(info);
-                        if (this.isCurrent(runId)) {
-                           this.microphone = line;
-                           line.open(format);
-                           line.start();
-                           this.status = "Voice: listening";
-                           this.recognizeLoop(runId, line, recognizer);
-                           break label175;
-                        }
-                     } catch (Throwable var21) {
-                        try {
-                           recognizer.close();
-                        } catch (Throwable var20) {
-                           var21.addSuppressed(var20);
-                        }
-
-                        throw var21;
-                     }
-
-                     recognizer.close();
-                     break label211;
-                  }
-
-                  recognizer.close();
-               } catch (Throwable var22) {
-                  try {
-                     model.close();
-                  } catch (Throwable var19) {
-                     var22.addSuppressed(var19);
-                  }
-
-                  throw var22;
-               }
-
-               model.close();
+         try (Recognizer recognizer = new Recognizer(model, SAMPLE_RATE, chantRequired ? GRAMMAR_CHANT_REQUIRED : GRAMMAR_EXPLOSION_ALONE)) {
+            MicrophoneCapture capture = MicrophoneCapture.open(ClientSettings.microphone());
+            if (!this.isCurrent(runId)) {
+               capture.close();
                return;
             }
 
-            model.close();
-            return;
+            this.microphone = capture;
+            this.status = "Voice: listening";
+            Voicemage.LOGGER.info("Voice recognition is listening on: {}", capture.describe());
+            this.recognizeLoop(runId, capture, recognizer, chantRequired);
          }
       } catch (InterruptedException interrupted) {
          Thread.currentThread().interrupt();
-         return;
       } catch (Exception error) {
          if (this.isCurrent(runId)) {
             this.status = "Voice error: " + concise(error.getMessage());
             Voicemage.LOGGER.error("Voice recognition stopped", error);
          }
-
-         return;
       } finally {
+         if (model != null) {
+            SharedSpeechModel.release();
+         }
+
          if (this.generation == runId) {
-            TargetDataLine active = this.microphone;
+            MicrophoneCapture active = this.microphone;
             if (active != null) {
                active.close();
             }
@@ -173,31 +158,30 @@ public final class VoiceRecognitionService {
       }
    }
 
-   private void recognizeLoop(long runId, TargetDataLine line, Recognizer recognizer) {
-      byte[] buffer = new byte[4096];
+   private void recognizeLoop(long runId, MicrophoneCapture capture, Recognizer recognizer, boolean initialChantRequired) {
+      byte[] buffer = new byte[MicrophoneCapture.OUTPUT_BUFFER_BYTES];
       String stablePartial = "";
       int stableCount = 0;
       Spell lastSpell = null;
       long lastCastNanos = 0L;
-      boolean activeChantRequired = true;
+      boolean activeChantRequired = initialChantRequired;
 
       while (this.isCurrent(runId) && !Thread.currentThread().isInterrupted()) {
          boolean required = this.explosionChantRequired;
          if (activeChantRequired != required) {
             recognizer.reset();
-            recognizer.setGrammar(
-               required
-                  ? "[\"fireball\",\"fire ball\",\"pitfall\",\"pit fall\",\"heal\",\"lightning\",\"lightening\",\"earth wall\",\"earthwall\",\"blink\",\"magic missile\",\"magic missle\",\"meteor\",\"wind blast\",\"windblast\",\"freeze\",\"clone\",\"polymorph\",\"poly morph\",\"shrink\",\"o ancient flame awaken from your endless slumber let the skys burn and turn my enemies to ash leaving nothing behind explosion\",\"o ancient flame awaken from your endless slumber let the skies burn and turn my enemies to ash leaving nothing behind explosion\",\"darkness blacker than black and darker than dark i beseech thee combine with my deep crimson return all creation to cinders and come from the abyss explosion\",\"[unk]\"]"
-                  : "[\"fireball\",\"fire ball\",\"pitfall\",\"pit fall\",\"heal\",\"lightning\",\"lightening\",\"earth wall\",\"earthwall\",\"blink\",\"magic missile\",\"magic missle\",\"meteor\",\"wind blast\",\"windblast\",\"freeze\",\"clone\",\"polymorph\",\"poly morph\",\"shrink\",\"o ancient flame awaken from your endless slumber let the skys burn and turn my enemies to ash leaving nothing behind explosion\",\"o ancient flame awaken from your endless slumber let the skies burn and turn my enemies to ash leaving nothing behind explosion\",\"darkness blacker than black and darker than dark i beseech thee combine with my deep crimson return all creation to cinders and come from the abyss explosion\",\"[unk]\"]"
-                     .replace("\"[unk]\"", "\"explosion\",\"[unk]\"")
-            );
+            recognizer.setGrammar(required ? GRAMMAR_CHANT_REQUIRED : GRAMMAR_EXPLOSION_ALONE);
             activeChantRequired = required;
             stablePartial = "";
             stableCount = 0;
             this.partialText = "";
          }
 
-         int read = line.read(buffer, 0, buffer.length);
+         int read = capture.read(buffer);
+         if (read < 0) {
+            break;
+         }
+
          if (read > 0) {
             if (recognizer.acceptWaveForm(buffer, read)) {
                String text = jsonText(recognizer.getResult(), "text");

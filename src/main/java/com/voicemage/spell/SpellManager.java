@@ -5,8 +5,12 @@ import com.voicemage.config.VoicemageConfig;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.block.state.BlockState;
 
 public final class SpellManager {
    private final Map<UUID, SpellManager.PlayerMana> players = new HashMap<>();
@@ -19,6 +23,20 @@ public final class SpellManager {
 
    public double mana(ServerPlayer player) {
       return this.state(player).mana;
+   }
+
+   /** @return true if a player broke one of our temporary blocks and it was removed cleanly (cancel the vanilla break) */
+   /** @return true while the creature is frozen by Freeze (it can not suffocate in the ice) */
+   public boolean isFrozen(LivingEntity entity) {
+      return this.effects.isFrozen(entity);
+   }
+
+   public boolean handleTemporaryBreak(ServerLevel level, BlockPos pos, BlockState state) {
+      return this.effects.breakTemporary(level, pos, state);
+   }
+
+   public void started(MinecraftServer server) {
+      this.effects.recoverJournal(server);
    }
 
    public void restoreMana(ServerPlayer player, int amount) {

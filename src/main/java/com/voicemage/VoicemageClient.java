@@ -4,6 +4,8 @@ import com.mojang.blaze3d.platform.InputConstants.Type;
 import com.voicemage.client.ExplosionImpactFrame;
 import com.voicemage.client.FallingSpellVisuals;
 import com.voicemage.client.ManaHud;
+import com.voicemage.client.SharedSpeechModel;
+import com.voicemage.client.MicrophoneCommands;
 import com.voicemage.client.VoiceRecognitionService;
 import com.voicemage.network.CastSpellPayload;
 import com.voicemage.network.ChantSettingsPayload;
@@ -38,6 +40,13 @@ public final class VoicemageClient implements ClientModInitializer {
 
    public void onInitializeClient() {
       voice = new VoiceRecognitionService(VoicemageClient::heardSpell);
+      MicrophoneCommands.register(() -> {
+         Minecraft minecraft = Minecraft.getInstance();
+         if (voiceEnabled && minecraft.player != null) {
+            voice.stop();
+            voice.start();
+         }
+      });
       ClientPlayNetworking.registerGlobalReceiver(
          ChantSettingsPayload.TYPE, (payload, context) -> context.client().execute(() -> voice.setExplosionChantRequired(payload.required()))
       );
@@ -58,11 +67,15 @@ public final class VoicemageClient implements ClientModInitializer {
       });
       ClientPlayConnectionEvents.DISCONNECT.register((Disconnect)(handler, client) -> {
          voice.stop();
+         SharedSpeechModel.freeWhenIdle();
          voice.setExplosionChantRequired(true);
          ExplosionImpactFrame.clear();
          FallingSpellVisuals.clear();
       });
-      ClientLifecycleEvents.CLIENT_STOPPING.register((ClientStopping)client -> voice.stop());
+      ClientLifecycleEvents.CLIENT_STOPPING.register((ClientStopping)client -> {
+         voice.stop();
+         SharedSpeechModel.freeWhenIdle();
+      });
       ClientTickEvents.END_CLIENT_TICK.register((EndTick)client -> {
          ExplosionImpactFrame.tick(client);
          FallingSpellVisuals.tick(client);

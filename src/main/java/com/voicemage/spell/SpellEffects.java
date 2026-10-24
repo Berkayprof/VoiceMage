@@ -1,10 +1,12 @@
 package com.voicemage.spell;
 
 import com.voicemage.VoicemageNetworking;
+import com.voicemage.Voicemage;
 import com.voicemage.config.VoicemageConfig;
 import com.voicemage.mixin.MannequinAccessor;
 import com.voicemage.network.FallingSpellPayload;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -12,6 +14,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.Map.Entry;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
@@ -72,6 +75,9 @@ final class SpellEffects {
    private final List<SpellEffects.CloneTask> clones = new ArrayList<>();
    private final List<SpellEffects.PolymorphTask> polymorphs = new ArrayList<>();
    private final List<SpellEffects.ShrinkTask> shrinks = new ArrayList<>();
+   private boolean journalDirty;
+   private int journalCountdown;
+   private final Map<UUID, Long> frozenUntil = new HashMap<>();
 
    boolean cast(ServerPlayer player, Spell spell) {
       return switch (spell) {
@@ -94,6 +100,8 @@ final class SpellEffects {
 
    void tick(MinecraftServer server) {
       this.tickTemporaryBlocks(server);
+      this.tickJournal(server);
+      this.purgeFrozen(server);
       this.tickFallingSpells(server);
       this.tickCraters(server);
       this.tickImpactVisuals(server);
@@ -109,7 +117,10 @@ final class SpellEffects {
       }
 
       this.temporaryBlocks.clear();
-      this.clones.forEach(task -> task.clone.discard());
+      this.clones.forEach(task -> {
+         TemporaryEntities.untrack(task.clone);
+         task.clone.discard();
+      });
       this.clones.clear();
       this.polymorphs.forEach(SpellEffects.PolymorphTask::finish);
       this.polymorphs.clear();
@@ -119,6 +130,59 @@ final class SpellEffects {
       this.impactVisuals.clear();
       this.healingVisuals.clear();
       this.craters.clear();
+      TemporaryEntities.clear();
+      this.frozenUntil.clear();
+      this.journalDirty = false;
+      TemporaryBlockJournal.delete(server);
+   }
+
+   /** Writes the list of temporary blocks to disk (at most once per second) so a crash cannot leave them behind. */
+   private void tickJournal(MinecraftServer server) {
+      if (this.journalCountdown > 0) {
+         this.journalCountdown--;
+      }
+
+      if (!this.journalDirty || this.journalCountdown > 0) {
+         return;
+      }
+
+      this.journalDirty = false;
+      this.journalCountdown = 20;
+      List<TemporaryBlockJournal.Entry> entries = new ArrayList<>();
+
+      for (SpellEffects.TemporaryBlock temporary : this.temporaryBlocks.keySet()) {
+         BlockPos pos = temporary.pos();
+         entries.add(
+            new TemporaryBlockJournal.Entry(
+               temporary.dimension().toString(), pos.getX(), pos.getY(), pos.getZ(), BuiltInRegistries.BLOCK.getKey(temporary.expected()).toString()
+            )
+         );
+      }
+
+      TemporaryBlockJournal.write(server, entries);
+   }
+
+   /** Removes temporary blocks that were left behind by a crash of an earlier session. */
+   void recoverJournal(MinecraftServer server) {
+      int removed = 0;
+
+      for (TemporaryBlockJournal.Entry entry : TemporaryBlockJournal.read(server)) {
+         for (ServerLevel level : server.getAllLevels()) {
+            if (level.dimension().toString().equals(entry.dimension)) {
+               BlockPos pos = new BlockPos(entry.x, entry.y, entry.z);
+               String present = BuiltInRegistries.BLOCK.getKey(level.getBlockState(pos).getBlock()).toString();
+               if (present.equals(entry.block) || "minecraft:ice".equals(entry.block) && "minecraft:water".equals(present)) {
+                  level.setBlock(pos, Blocks.AIR.defaultBlockState(), 3);
+                  removed++;
+               }
+            }
+         }
+      }
+
+      TemporaryBlockJournal.delete(server);
+      if (removed > 0) {
+         Voicemage.LOGGER.info("Removed {} temporary voicemage block(s) left behind by an earlier session", removed);
+      }
    }
 
    private void tickTemporaryBlocks(MinecraftServer server) {
@@ -130,15 +194,38 @@ final class SpellEffects {
          if (level != null && level.getGameTime() >= entry.getValue()) {
             removeTemporary(server, entry.getKey());
             iterator.remove();
+            this.journalDirty = true;
          }
       }
    }
 
    private static void removeTemporary(MinecraftServer server, SpellEffects.TemporaryBlock temporary) {
       ServerLevel level = server.getLevel(temporary.dimension());
-      if (level != null && level.getBlockState(temporary.pos()).is(temporary.expected())) {
-         level.setBlock(temporary.pos(), Blocks.AIR.defaultBlockState(), 3);
+      if (level != null) {
+         BlockState current = level.getBlockState(temporary.pos());
+         // Ice that melted (next to a light source) turned into water on exactly this spot: remove that as well.
+         boolean meltedIce = temporary.expected() == Blocks.ICE && current.is(Blocks.WATER);
+         if (current.is(temporary.expected()) || meltedIce) {
+            level.setBlock(temporary.pos(), Blocks.AIR.defaultBlockState(), 3);
+         }
       }
+   }
+
+   /**
+    * Called when a player breaks a block. If it is one of our temporary blocks, it is removed cleanly instead of
+    * through vanilla: breaking ice would otherwise leave a water source behind, and breaking an earth wall would drop items.
+    *
+    * @return true if the block was ours and has been handled (the vanilla break must be cancelled)
+    */
+   boolean breakTemporary(ServerLevel level, BlockPos pos, BlockState state) {
+      SpellEffects.TemporaryBlock key = new SpellEffects.TemporaryBlock(level.dimension(), pos.immutable(), state.getBlock());
+      if (this.temporaryBlocks.remove(key) == null) {
+         return false;
+      }
+
+      level.destroyBlock(pos, false);
+      this.journalDirty = true;
+      return true;
    }
 
    private void tickFallingSpells(MinecraftServer server) {
@@ -500,6 +587,7 @@ final class SpellEffects {
             clone.setYHeadRot(facing);
             clone.setYBodyRot(facing);
          } else {
+            TemporaryEntities.untrack(clone);
             clone.discard();
             iterator.remove();
          }
@@ -750,39 +838,103 @@ final class SpellEffects {
 
    private boolean freeze(ServerPlayer player) {
       ServerLevel level = player.level();
-      Vec3 center = aimedHit(player, VoicemageConfig.INSTANCE.skillShotRange, true).getLocation();
+      double range = VoicemageConfig.INSTANCE.skillShotRange;
+      Vec3 center = aimedHit(player, range, true).getLocation();
       double radius = VoicemageConfig.INSTANCE.freezeRadius;
       AABB area = new AABB(center.x - radius, center.y - radius, center.z - radius, center.x + radius, center.y + radius, center.z + radius);
       int duration = VoicemageConfig.INSTANCE.freezeDurationTicks;
-      int frozen = 0;
-
-      for (LivingEntity target : level.getEntitiesOfClass(LivingEntity.class, area, entity -> entity != player && entity.isAlive())) {
-         if (!(target instanceof Player targetPlayer) || player.canHarmPlayer(targetPlayer)) {
-            target.addEffect(new MobEffectInstance(MobEffects.SLOWNESS, duration, 255, false, true), player);
-            target.addEffect(new MobEffectInstance(MobEffects.MINING_FATIGUE, duration, 4, false, true), player);
-            target.setDeltaMovement(Vec3.ZERO);
-            target.hurtMarked = true;
-            long expires = level.getGameTime() + duration;
-            BlockPos feet = target.blockPosition();
-
-            for (int y = -1; y <= 3; y++) {
-               for (int x = -1; x <= 1; x++) {
-                  for (int z = -1; z <= 1; z++) {
-                     boolean shell = y == -1 || y == 3 || Math.abs(x) == 1 || Math.abs(z) == 1;
-                     if (shell) {
-                        this.placeTemporary(level, feet.offset(x, y, z), Blocks.ICE.defaultBlockState(), expires);
-                     }
-                  }
-               }
-            }
-
-            frozen++;
+      List<LivingEntity> candidates = level.getEntitiesOfClass(
+         LivingEntity.class, area, entity -> entity != player && entity.isAlive() && (!(entity instanceof Player other) || player.canHarmPlayer(other))
+      );
+      List<LivingEntity> targets = new ArrayList<>();
+      if (VoicemageConfig.INSTANCE.freezeSingleTarget) {
+         LivingEntity aimed = skillTarget(player, range);
+         if (aimed == null || !aimed.isAlive()) {
+            // Not aiming straight at a creature: take the one closest to where you are aiming.
+            Vec3 point = center;
+            aimed = candidates.stream().min(Comparator.comparingDouble(entity -> entity.distanceToSqr(point))).orElse(null);
          }
+
+         if (aimed != null) {
+            targets.add(aimed);
+            center = aimed.position();
+         }
+      } else {
+         targets.addAll(candidates);
+      }
+
+      long expires = level.getGameTime() + duration;
+
+      // Frozen creatures can not suffocate in the ice; register them before any ice is placed.
+      for (LivingEntity target : targets) {
+         this.frozenUntil.put(target.getUUID(), expires + 20L);
+      }
+
+      for (LivingEntity target : targets) {
+         target.addEffect(new MobEffectInstance(MobEffects.SLOWNESS, duration, 255, false, true), player);
+         target.addEffect(new MobEffectInstance(MobEffects.MINING_FATIGUE, duration, 4, false, true), player);
+         target.setDeltaMovement(Vec3.ZERO);
+         target.hurtMarked = true;
+         this.buildIceCage(level, target, expires);
       }
 
       level.sendParticles(ParticleTypes.SNOWFLAKE, center.x, center.y + 0.8, center.z, 70, radius, radius * 0.6, radius, 0.02);
       level.playSound(null, BlockPos.containing(center), SoundEvents.GLASS_PLACE, SoundSource.PLAYERS, 1.2F, 1.6F);
-      return frozen > 0;
+      return !targets.isEmpty();
+   }
+
+   /** Hollow 3x3 cage of ice around the creature. Ice is never placed inside creatures that are not frozen themselves. */
+   private void buildIceCage(ServerLevel level, LivingEntity target, long expires) {
+      BlockPos feet = target.blockPosition();
+
+      for (int y = -1; y <= 3; y++) {
+         for (int x = -1; x <= 1; x++) {
+            for (int z = -1; z <= 1; z++) {
+               boolean shell = y == -1 || y == 3 || Math.abs(x) == 1 || Math.abs(z) == 1;
+               if (shell) {
+                  BlockPos pos = feet.offset(x, y, z);
+                  if (!this.overlapsBystander(level, pos)) {
+                     this.placeTemporary(level, pos, Blocks.ICE.defaultBlockState(), expires);
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   /** True if a living creature that is not frozen (the caster, a bystander) stands in this block: ice there would suffocate it. */
+   private boolean overlapsBystander(ServerLevel level, BlockPos pos) {
+      AABB cell = new AABB(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
+
+      for (LivingEntity entity : level.getEntitiesOfClass(LivingEntity.class, cell, LivingEntity::isAlive)) {
+         if (!this.frozenUntil.containsKey(entity.getUUID())) {
+            return true;
+         }
+      }
+
+      return false;
+   }
+
+   /** Frozen creatures are immune to suffocation damage (checked from the damage event in Voicemage). */
+   boolean isFrozen(LivingEntity entity) {
+      Long until = this.frozenUntil.get(entity.getUUID());
+      if (until == null) {
+         return false;
+      }
+
+      if (entity.level().getGameTime() > until) {
+         this.frozenUntil.remove(entity.getUUID());
+         return false;
+      }
+
+      return true;
+   }
+
+   private void purgeFrozen(MinecraftServer server) {
+      if (!this.frozenUntil.isEmpty() && server.getTickCount() % 200 == 0) {
+         long now = server.overworld().getGameTime();
+         this.frozenUntil.values().removeIf(until -> until < now);
+      }
    }
 
    private boolean cloneSpell(ServerPlayer player) {
@@ -814,6 +966,7 @@ final class SpellEffects {
             clone.setInvulnerable(true);
             clone.setSilent(true);
             clone.setNoGravity(false);
+            TemporaryEntities.track(clone);
             level.addFreshEntity(clone);
             this.clones.add(new SpellEffects.CloneTask(clone, direction, expires, 8 + i * 7));
             spawned++;
@@ -840,6 +993,7 @@ final class SpellEffects {
          form.setPersistenceRequired();
          form.setInvulnerable(true);
          form.setNoAi(true);
+         TemporaryEntities.track(form);
          level.addFreshEntity(form);
          boolean alreadyInvisible = target.getEffect(MobEffects.INVISIBILITY) != null;
          int duration = VoicemageConfig.INSTANCE.polymorphDurationTicks;
@@ -926,6 +1080,7 @@ final class SpellEffects {
       }
 
       this.temporaryBlocks.put(new SpellEffects.TemporaryBlock(level.dimension(), pos.immutable(), state.getBlock()), expires);
+      this.journalDirty = true;
       return true;
    }
 
@@ -1008,6 +1163,7 @@ final class SpellEffects {
       }
 
       private void finish() {
+         TemporaryEntities.untrack(this.form);
          if (!this.form.isRemoved()) {
             this.form.discard();
          }

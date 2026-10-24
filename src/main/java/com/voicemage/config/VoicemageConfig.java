@@ -9,6 +9,9 @@ import java.io.Reader;
 import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import net.fabricmc.loader.api.FabricLoader;
 
 public final class VoicemageConfig {
@@ -16,6 +19,7 @@ public final class VoicemageConfig {
    public static final int MAX_SPELL_MANA_COST = 100;
    public static final double MAX_MANA_REGENERATION = 100.0;
    public static VoicemageConfig INSTANCE = new VoicemageConfig();
+   private static boolean loadedOnce;
    public int configVersion = 6;
    public double maximumMana = 100.0;
    public double manaRegenerationPerSecond = 5.0;
@@ -53,6 +57,7 @@ public final class VoicemageConfig {
    public double windBlastRange = 12.0;
    public double windBlastDamage = 2.0;
    public double windBlastStrength = 2.8;
+   public boolean freezeSingleTarget = true;
    public double freezeRadius = 4.0;
    public int freezeDurationTicks = 60;
    public int cloneCount = 3;
@@ -140,15 +145,29 @@ public final class VoicemageConfig {
       save();
    }
 
-   public static void load() {
+   /**
+    * Reads config/voicemage.json.
+    *
+    * @return false when the file exists but could not be read. A copy of it is kept as voicemage.json.broken-<time>.
+    *         On a reload the previous settings then stay active; at startup the defaults are used.
+    */
+   public static boolean load() {
       Path path = FabricLoader.getInstance().getConfigDir().resolve("voicemage.json");
       VoicemageConfig loaded = null;
+      boolean unreadable = false;
       if (Files.isRegularFile(path)) {
          try (Reader reader = Files.newBufferedReader(path)) {
             loaded = (VoicemageConfig)GSON.fromJson(reader, VoicemageConfig.class);
          } catch (Exception exception) {
-            Voicemage.LOGGER.error("Could not read {}; using safe defaults", path, exception);
+            unreadable = true;
+            Path backup = backupUnreadable(path);
+            Voicemage.LOGGER.error("Could not read {} ({}). A copy was kept as {}.", path, exception.getMessage(), backup);
          }
+      }
+
+      if (unreadable && loadedOnce) {
+         Voicemage.LOGGER.error("Keeping the previously loaded voicemage settings.");
+         return false;
       }
 
       if (loaded != null && loaded.configVersion < 4) {
@@ -194,6 +213,21 @@ public final class VoicemageConfig {
       INSTANCE = loaded == null ? new VoicemageConfig() : loaded;
       INSTANCE.sanitize();
       save();
+      loadedOnce = true;
+      return !unreadable;
+   }
+
+   private static Path backupUnreadable(Path path) {
+      String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+      Path backup = path.resolveSibling(path.getFileName() + ".broken-" + stamp);
+
+      try {
+         Files.copy(path, backup, StandardCopyOption.REPLACE_EXISTING);
+         return backup;
+      } catch (IOException exception) {
+         Voicemage.LOGGER.warn("Could not back up {}", path, exception);
+         return null;
+      }
    }
 
    public static void setManaRegenerationPerSecond(double value) {

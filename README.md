@@ -1,6 +1,6 @@
 # 🧙 VoiceMage
 
-![Version](https://img.shields.io/badge/version-2.13.2-4169E1)
+![Version](https://img.shields.io/badge/version-2.14.0-4169E1)
 ![Minecraft](https://img.shields.io/badge/Minecraft-26.2-2E8B57?logo=minecraft)
 ![Loader](https://img.shields.io/badge/Loader-Fabric-DBD0B4)
 ![Java](https://img.shields.io/badge/Java-25%2B-ED8B00)

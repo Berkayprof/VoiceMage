@@ -59,8 +59,14 @@ public final class VoicemageCommands {
             }
          );
       root.then(((LiteralArgumentBuilder)Commands.literal("reload").requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))).executes(context -> {
-         VoicemageConfig.load();
+         boolean loaded = VoicemageConfig.load();
          VoicemageNetworking.broadcastSettings(((CommandSourceStack)context.getSource()).getServer());
+         if (!loaded) {
+            ((CommandSourceStack)context.getSource())
+               .sendFailure(Component.literal("config/voicemage.json could not be read. The previous settings stay active; a backup copy of the file was saved next to it."));
+            return 0;
+         }
+
          ((CommandSourceStack)context.getSource()).sendSuccess(() -> Component.literal("Reloaded config/voicemage.json."), false);
          return 1;
       }));
@@ -124,7 +130,7 @@ public final class VoicemageCommands {
                         ((CommandSourceStack)context.getSource())
                            .sendSuccess(
                               () -> Component.literal(
-                                 "Explosion chants\n\nO ancient flame, awaken from your endless slumber. Let the skys burn and turn my enemies to ash, leaving nothing behind. EXPLOSION!\n\nDarkness blacker than black and darker than dark,\nI beseech thee, combine with my deep crimson.\nReturn all creation to cinders,\nand come frome the abyss!\nEXPLOSION!"
+                                 "Explosion chants\n\nO ancient flame, awaken from your endless slumber. Let the skies burn and turn my enemies to ash, leaving nothing behind. EXPLOSION!\n\nDarkness blacker than black and darker than dark,\nI beseech thee, combine with my deep crimson.\nReturn all creation to cinders,\nand come from the abyss!\nEXPLOSION!"
                               ),
                               false
                            );
